@@ -498,8 +498,15 @@ export class StatusPageHtmlGenerator implements PageGeneratorService {
                 min-width: auto !important;
                 width: 100% !important;
             }
+
+            /* Make individual bars elastic so all 90 fit the card width */
+            .history-bar {
+                width: auto !important;
+                min-width: 1px;
+                flex: 1 1 0 !important;
+            }
         }
-        
+
         @media (max-width: 480px) {
             .container { padding: 0.5rem; }
             .header h1 { font-size: 1.75rem; }
