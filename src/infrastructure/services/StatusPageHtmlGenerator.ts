@@ -547,7 +547,7 @@ export class StatusPageHtmlGenerator implements PageGeneratorService {
         
         <div class="footer">
             <div class="footer-left">
-                <p>Last updated: ${data.lastUpdated.toLocaleString('en-AU', { timeZone: 'UTC' })}</p>
+                <p>Last updated: <time data-utc="${data.lastUpdated.toISOString()}">${data.lastUpdated.toISOString().split('T')[0]}, ${data.lastUpdated.toLocaleTimeString('en-AU', { timeZone: 'UTC' })} (UTC)</time></p>
             </div>
             <div class="footer-right">
                 <a href="/rss" class="rss-link" title="Subscribe to incident updates via RSS">
@@ -569,6 +569,24 @@ export class StatusPageHtmlGenerator implements PageGeneratorService {
                 const category = header.closest('.category');
                 category.classList.toggle('expanded');
             });
+        });
+
+        // Convert server-rendered UTC timestamps to viewer's local timezone
+        document.querySelectorAll('time[data-utc]').forEach(el => {
+            const utc = el.getAttribute('data-utc');
+            if (!utc) return;
+            const d = new Date(utc);
+            if (isNaN(d.getTime())) return;
+            const date = d.toLocaleDateString('en-CA'); // yyyy-mm-dd
+            const time = d.toLocaleTimeString('en-AU');
+            let tz = '';
+            try {
+                const part = new Intl.DateTimeFormat('en-US', { timeZoneName: 'short' })
+                    .formatToParts(d)
+                    .find(p => p.type === 'timeZoneName');
+                tz = part ? part.value : '';
+            } catch (e) {}
+            el.textContent = date + ', ' + time + (tz ? ' (' + tz + ')' : '');
         });
     </script>
 </body>
