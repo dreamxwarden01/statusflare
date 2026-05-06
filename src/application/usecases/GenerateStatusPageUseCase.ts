@@ -57,12 +57,18 @@ export class GenerateStatusPageUseCase {
 						// row falls in roughly one grid window. D1 picks the worst status per
 						// bucket (down > degraded > others) preserving outage visibility.
 						const bucketSeconds = 960;
+						// Pull bucketed history one bucket earlier than dataWindowStart so the
+						// first JS grid point always has a row at-or-before it. Buckets are
+						// aligned to absolute Unix-time / 960, so without this the bucket
+						// straddling dataWindowStart can have its representative row land
+						// later than grid[0], leaving the first bar 'unknown'.
+						const bucketSince = new Date(dataWindowStart.getTime() - bucketSeconds * 1000);
 						const [latestCheck, uptimeStats, bucketedChecks] = await Promise.all([
 							this.statusCheckRepository.findLatestByServiceId(service.id),
 							this.statusCheckRepository.getUptimeStats(service.id, dataWindowStart),
 							this.statusCheckRepository.findBucketedSince(
 								service.id,
-								dataWindowStart,
+								bucketSince,
 								bucketSeconds
 							),
 						]);
