@@ -42,12 +42,14 @@ export class GenerateStatusPageUseCase {
 		// Generate shared time grid for consistent sampling across all services and categories
 		const sharedTimeGrid = this.generateSharedTimeGrid(dataWindowStart, dataWindowEnd, 90);
 
+		// Fetch all services once and reuse across categories (was previously
+		// queried per-category, costing N redundant DB roundtrips).
+		const allServices = await this.serviceRepository.findAll();
+
 		// Group services by category
 		const categoryStatusData = await Promise.all(
 			categories.map(async category => {
-				// Get services for this category
-				const services = await this.serviceRepository.findAll();
-				const categoryServices = services.filter(s => s.categoryId === category.id);
+				const categoryServices = allServices.filter(s => s.categoryId === category.id);
 
 				const serviceStatusData = await Promise.all(
 					categoryServices.map(async service => {
