@@ -608,7 +608,7 @@ export class StatusPageHtmlGenerator implements PageGeneratorService {
             if (fmt === 'datetime') {
                 const date = d.toLocaleDateString('en-AU', { year: 'numeric', month: 'short', day: 'numeric' });
                 const time = d.toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' });
-                title = prefix + '\n' + date + ', ' + time;
+                title = prefix + '\\n' + date + ', ' + time;
             } else if (fmt === 'date') {
                 const date = d.toLocaleDateString('en-AU', { year: 'numeric', month: 'short', day: 'numeric' });
                 title = (prefix ? prefix + ' ' : '') + date;
