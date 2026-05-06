@@ -595,6 +595,28 @@ export class StatusPageHtmlGenerator implements PageGeneratorService {
             } catch (e) {}
             el.textContent = date + ', ' + time + (tz ? ' (' + tz + ')' : '');
         });
+
+        // Convert history-bar tooltips to the viewer's local timezone
+        document.querySelectorAll('.history-bar[data-utc]').forEach(el => {
+            const utc = el.getAttribute('data-utc');
+            if (!utc) return;
+            const d = new Date(utc);
+            if (isNaN(d.getTime())) return;
+            const fmt = el.getAttribute('data-fmt');
+            const prefix = el.getAttribute('data-prefix') || '';
+            let title;
+            if (fmt === 'datetime') {
+                const date = d.toLocaleDateString('en-AU', { year: 'numeric', month: 'short', day: 'numeric' });
+                const time = d.toLocaleTimeString('en-AU', { hour: '2-digit', minute: '2-digit' });
+                title = prefix + '\n' + date + ', ' + time;
+            } else if (fmt === 'date') {
+                const date = d.toLocaleDateString('en-AU', { year: 'numeric', month: 'short', day: 'numeric' });
+                title = (prefix ? prefix + ' ' : '') + date;
+            } else {
+                return;
+            }
+            el.setAttribute('title', title);
+        });
     </script>
 </body>
 </html>`;
@@ -785,7 +807,10 @@ export class StatusPageHtmlGenerator implements PageGeneratorService {
 				}
 
 				const color = this.getHistoryBarColor(point.status);
-				return `<div class="history-bar" style="background: ${color};" title="${point.status} on ${point.timestamp.toLocaleDateString('en-AU')}"></div>`;
+				const utcIso = point.timestamp.toISOString();
+				const utcDate = point.timestamp.toLocaleDateString('en-AU', { timeZone: 'UTC' });
+				const fallbackTitle = `${point.status} on ${utcDate} (UTC)`;
+				return `<div class="history-bar" style="background: ${color};" title="${fallbackTitle}" data-utc="${utcIso}" data-prefix="${point.status} on" data-fmt="date"></div>`;
 			})
 			.join('');
 	}
@@ -840,17 +865,22 @@ export class StatusPageHtmlGenerator implements PageGeneratorService {
 				// Color based on status
 				const color = this.getHistoryBarColor(point.status);
 
-				// Enhanced tooltip with better datetime formatting
-				const dateTime = point.timestamp.toLocaleString('en-AU', {
+				// Enhanced tooltip with better datetime formatting. Server-rendered
+				// fallback is in UTC; client JS replaces it with the viewer's local
+				// timezone via data-utc / data-prefix / data-fmt below.
+				const utcIso = point.timestamp.toISOString();
+				const utcDateTime = point.timestamp.toLocaleString('en-AU', {
 					year: 'numeric',
 					month: 'short',
 					day: 'numeric',
 					hour: '2-digit',
 					minute: '2-digit',
+					timeZone: 'UTC',
 				});
-				const title = `${this.formatStatus(point.status)} - ${point.responseTime}ms\n${dateTime}`;
+				const prefix = `${this.formatStatus(point.status)} - ${point.responseTime}ms`;
+				const fallbackTitle = `${prefix}\n${utcDateTime} (UTC)`;
 
-				return `<div class="history-bar" style="background: ${color}; height: ${height}px;" title="${title}"></div>`;
+				return `<div class="history-bar" style="background: ${color}; height: ${height}px;" title="${fallbackTitle}" data-utc="${utcIso}" data-prefix="${prefix}" data-fmt="datetime"></div>`;
 			})
 			.join('');
 	}

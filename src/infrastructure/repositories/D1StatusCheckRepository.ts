@@ -84,13 +84,17 @@ export class D1StatusCheckRepository implements StatusCheckRepository {
 	}
 
 	async getUptimeStats(serviceId: number, since: Date): Promise<UptimeStats> {
+		// `checked_at` is stored in SQLite canonical form ('YYYY-MM-DD HH:MM:SS').
+		// `since.toISOString()` produces '...T...Z' which sorts wrong against that
+		// canonical form via plain string compare. Wrapping the param in datetime()
+		// normalises it so both sides are comparable.
 		const row = await this.db
 			.prepare(
 				`SELECT
 					COUNT(*) AS total,
 					SUM(CASE WHEN status IN ('up', 'degraded') THEN 1 ELSE 0 END) AS up
 				FROM status_checks
-				WHERE service_id = ? AND checked_at >= ?`
+				WHERE service_id = ? AND checked_at >= datetime(?)`
 			)
 			.bind(serviceId, since.toISOString())
 			.first<{ total: number; up: number | null }>();
@@ -108,6 +112,7 @@ export class D1StatusCheckRepository implements StatusCheckRepository {
 	): Promise<StatusCheck[]> {
 		// One row per bucket, prioritising worst status then most recent within bucket.
 		// Status priority: down(0) > degraded(1) > others(2). ROW_NUMBER picks rank=1.
+		// See getUptimeStats for the datetime(?) wrapping rationale.
 		const result = await this.db
 			.prepare(
 				`WITH bucketed AS (
@@ -115,7 +120,7 @@ export class D1StatusCheckRepository implements StatusCheckRepository {
 						id, service_id, status, response_time_ms, status_code, error_message, checked_at,
 						CAST(strftime('%s', checked_at) / ? AS INTEGER) AS bucket
 					FROM status_checks
-					WHERE service_id = ? AND checked_at >= ?
+					WHERE service_id = ? AND checked_at >= datetime(?)
 				),
 				ranked AS (
 					SELECT *, ROW_NUMBER() OVER (
