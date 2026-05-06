@@ -20,6 +20,9 @@ import { SLO, NotificationChannel, SLONotification } from './domain/entities/SLO
 import { AdminPageHandler } from './infrastructure/handlers/AdminPageHandler';
 import { TestWebhookHandler } from './infrastructure/handlers/TestWebhookHandler';
 
+/** Lazy-regen freshness window for cached status.html and rss.xml in R2. */
+const PAGE_CACHE_TTL_MS = 5 * 60 * 1000;
+
 const handler = {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
@@ -64,7 +67,7 @@ const handler = {
 		try {
 			switch (url.pathname) {
 				case '/':
-					return await handler.handleStatusPage(generateStatusPageUseCase, env.R2);
+					return await handler.handleStatusPage(generateStatusPageUseCase, env.R2, ctx);
 
 				case '/admin':
 					return await adminPageHandler.handleAdminPage(request, env);
@@ -75,7 +78,7 @@ const handler = {
 				case '/rss':
 				case '/feed':
 				case '/rss.xml':
-					return await handler.handleRssFeed(env);
+					return await handler.handleRssFeed(env, ctx);
 
 				case '/api/services':
 					if (!handler.authenticateApiRequest(request, env)) {
@@ -221,67 +224,11 @@ const handler = {
 					// Clean up old status check data (keep last 7 days)
 					await statusCheckRepository.deleteOld(7);
 
-					// Generate and store status page
-					const pageConfigRepository = new D1PageConfigRepository(env.DB);
-					const categoryRepository = new D1CategoryRepository(env.DB);
-					const systemStatusRepository = new D1SystemStatusRepository(env.DB);
-					const incidentRepository = new D1IncidentRepository(env.DB);
-					const incidentUpdateRepository = new D1IncidentUpdateRepository(env.DB);
-					const pageGeneratorService = new StatusPageHtmlGenerator();
-
-					const generateStatusPageUseCase = new GenerateStatusPageUseCase(
-						serviceRepository,
-						statusCheckRepository,
-						pageConfigRepository,
-						categoryRepository,
-						systemStatusRepository,
-						incidentRepository,
-						incidentUpdateRepository,
-						pageGeneratorService
-					);
-
-					const statusPageHtml = await generateStatusPageUseCase.execute();
-
-					// Store the generated page in R2
-					await env.R2.put('status.html', statusPageHtml, {
-						httpMetadata: {
-							contentType: 'text/html',
-						},
-					});
-
-					// Generate and cache RSS feed
-					const rssGenerator = new RssFeedGenerator();
-					const incidents = await incidentRepository.findRecent(50);
-					const incidentsWithUpdates = await Promise.all(
-						incidents.map(async incident => {
-							const updates = await incidentUpdateRepository.findByIncidentId(incident.id);
-							return {
-								...incident,
-								updates,
-							};
-						})
-					);
-
-					const pageConfig = await pageConfigRepository.get();
-					const title = pageConfig?.title || env.SITE_TITLE || 'Status Page';
-					const baseUrl = env.BASE_URL;
-
-					const rssFeed = rssGenerator.generateRssFeed({
-						title,
-						description: 'Status updates and incident reports for ' + title,
-						link: baseUrl,
-						incidents: incidentsWithUpdates,
-						lastUpdated: new Date(),
-						titleSuffix: env.RSS_TITLE_SUFFIX,
-					});
-
-					await env.R2.put('rss.xml', rssFeed, {
-						httpMetadata: {
-							contentType: 'application/rss+xml; charset=utf-8',
-						},
-					});
-
-					console.log('Status checks, SLO monitoring, page and RSS feed completed');
+					// Page and RSS regeneration moved to the request handlers
+					// (lazy, with PAGE_CACHE_TTL_MS freshness window). The cron's job
+					// is now data collection only — keeps cron CPU/wall time minimal
+					// regardless of how the rendered page evolves.
+					console.log('Status checks, SLO monitoring, and cleanup completed');
 				} catch (error) {
 					console.error('Scheduled task error:', error);
 				}
@@ -298,20 +245,20 @@ const handler = {
 		return apiKey === env.STATUSFLARE_ADMIN_PASSWORD;
 	},
 
-	async handleRssFeed(env: Env): Promise<Response> {
+	async handleRssFeed(env: Env, ctx: ExecutionContext): Promise<Response> {
 		try {
-			// Try to get cached RSS feed from R2 first
-			const cachedRssFeed = await env.R2.get('rss.xml');
-			if (cachedRssFeed) {
-				return new Response(await cachedRssFeed.text(), {
+			const cached = await env.R2.get('rss.xml');
+			if (cached && Date.now() - cached.uploaded.getTime() < PAGE_CACHE_TTL_MS) {
+				return new Response(await cached.text(), {
 					headers: {
 						'Content-Type': 'application/rss+xml; charset=utf-8',
-						'Cache-Control': 'public, max-age=900', // Cache for 15 minutes
+						'Cache-Control': 'public, max-age=900',
 					},
 				});
 			}
 
-			// Fallback: Generate RSS feed if not cached (first run scenario)
+			// Stale or missing — regenerate, kick the R2 write into waitUntil so the
+			// response isn't blocked on it.
 			const incidentRepository = new D1IncidentRepository(env.DB);
 			const incidentUpdateRepository = new D1IncidentUpdateRepository(env.DB);
 			const pageConfigRepository = new D1PageConfigRepository(env.DB);
@@ -341,6 +288,12 @@ const handler = {
 				titleSuffix: env.RSS_TITLE_SUFFIX,
 			});
 
+			ctx.waitUntil(
+				env.R2.put('rss.xml', rssFeed, {
+					httpMetadata: { contentType: 'application/rss+xml; charset=utf-8' },
+				})
+			);
+
 			return new Response(rssFeed, {
 				headers: {
 					'Content-Type': 'application/rss+xml; charset=utf-8',
@@ -355,19 +308,25 @@ const handler = {
 
 	async handleStatusPage(
 		generateStatusPageUseCase: GenerateStatusPageUseCase,
-		r2: R2Bucket
+		r2: R2Bucket,
+		ctx: ExecutionContext
 	): Promise<Response> {
 		try {
-			// Try to get cached version from R2 first
-			const cachedPage = await r2.get('status.html');
-			if (cachedPage) {
-				return new Response(await cachedPage.text(), {
+			const cached = await r2.get('status.html');
+			if (cached && Date.now() - cached.uploaded.getTime() < PAGE_CACHE_TTL_MS) {
+				return new Response(await cached.text(), {
 					headers: { 'Content-Type': 'text/html' },
 				});
 			}
 
-			// Generate fresh page if no cache
+			// Stale or missing — regenerate, write back via waitUntil so the
+			// response isn't blocked on the R2 PUT.
 			const statusPageHtml = await generateStatusPageUseCase.execute();
+			ctx.waitUntil(
+				r2.put('status.html', statusPageHtml, {
+					httpMetadata: { contentType: 'text/html' },
+				})
+			);
 			return new Response(statusPageHtml, {
 				headers: { 'Content-Type': 'text/html' },
 			});
