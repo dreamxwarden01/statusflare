@@ -53,30 +53,34 @@ export class GenerateStatusPageUseCase {
 
 				const serviceStatusData = await Promise.all(
 					categoryServices.map(async service => {
-						const [latestCheck, recentChecks] = await Promise.all([
+						// Bucket size matches the JS time grid (24h / 90 ≈ 960s) so each bucketed
+						// row falls in roughly one grid window. D1 picks the worst status per
+						// bucket (down > degraded > others) preserving outage visibility.
+						const bucketSeconds = 960;
+						const [latestCheck, uptimeStats, bucketedChecks] = await Promise.all([
 							this.statusCheckRepository.findLatestByServiceId(service.id),
-							this.statusCheckRepository.findByServiceId(service.id, 1440), // 24 hours of minute checks
+							this.statusCheckRepository.getUptimeStats(service.id, dataWindowStart),
+							this.statusCheckRepository.findBucketedSince(
+								service.id,
+								dataWindowStart,
+								bucketSeconds
+							),
 						]);
 
-						// Calculate uptime considering all non-down statuses as "up"
-						const upChecks = recentChecks.filter(
-							check => check.status === 'up' || check.status === 'degraded'
-						).length;
-						const uptime = recentChecks.length > 0 ? (upChecks / recentChecks.length) * 100 : 0;
+						// Calculate uptime from D1-side aggregate (status 'up' or 'degraded' counts as up)
+						const uptime =
+							uptimeStats.total > 0 ? (uptimeStats.up / uptimeStats.total) * 100 : 0;
 
 						// Determine current status with better logic
 						let currentStatus = latestCheck?.status || 'unknown';
 
-						// If we have recent data but no latest check, use the most recent from history
-						if (!latestCheck && recentChecks.length > 0) {
-							const sortedChecks = recentChecks.sort(
-								(a, b) => new Date(b.checkedAt).getTime() - new Date(a.checkedAt).getTime()
-							);
-							currentStatus = sortedChecks[0].status;
+						// If we have recent data but no latest check, use the most recent bucketed row
+						if (!latestCheck && bucketedChecks.length > 0) {
+							currentStatus = bucketedChecks[bucketedChecks.length - 1].status;
 						}
 
-						// Sample the history data using shared time grid for alignment
-						const sampledHistory = this.sampleToTimeGrid(recentChecks, sharedTimeGrid);
+						// Sample the bucketed history data to the shared time grid for alignment
+						const sampledHistory = this.sampleToTimeGrid(bucketedChecks, sharedTimeGrid);
 
 						return {
 							id: service.id,

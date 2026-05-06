@@ -1,4 +1,7 @@
-import { StatusCheckRepository } from '../../domain/repositories/StatusCheckRepository';
+import {
+	StatusCheckRepository,
+	UptimeStats,
+} from '../../domain/repositories/StatusCheckRepository';
 import {
 	StatusCheck,
 	CreateStatusCheckRequest,
@@ -78,6 +81,64 @@ export class D1StatusCheckRepository implements StatusCheckRepository {
 			.all<any>();
 
 		return results.results.map(row => this.mapToStatusCheck(row));
+	}
+
+	async getUptimeStats(serviceId: number, since: Date): Promise<UptimeStats> {
+		const row = await this.db
+			.prepare(
+				`SELECT
+					COUNT(*) AS total,
+					SUM(CASE WHEN status IN ('up', 'degraded') THEN 1 ELSE 0 END) AS up
+				FROM status_checks
+				WHERE service_id = ? AND checked_at >= ?`
+			)
+			.bind(serviceId, since.toISOString())
+			.first<{ total: number; up: number | null }>();
+
+		return {
+			total: row?.total ?? 0,
+			up: row?.up ?? 0,
+		};
+	}
+
+	async findBucketedSince(
+		serviceId: number,
+		since: Date,
+		bucketSeconds: number
+	): Promise<StatusCheck[]> {
+		// One row per bucket, prioritising worst status then most recent within bucket.
+		// Status priority: down(0) > degraded(1) > others(2). ROW_NUMBER picks rank=1.
+		const result = await this.db
+			.prepare(
+				`WITH bucketed AS (
+					SELECT
+						id, service_id, status, response_time_ms, status_code, error_message, checked_at,
+						CAST(strftime('%s', checked_at) / ? AS INTEGER) AS bucket
+					FROM status_checks
+					WHERE service_id = ? AND checked_at >= ?
+				),
+				ranked AS (
+					SELECT *, ROW_NUMBER() OVER (
+						PARTITION BY bucket
+						ORDER BY
+							CASE status
+								WHEN 'down' THEN 0
+								WHEN 'degraded' THEN 1
+								ELSE 2
+							END,
+							checked_at DESC
+					) AS rn
+					FROM bucketed
+				)
+				SELECT id, service_id, status, response_time_ms, status_code, error_message, checked_at
+				FROM ranked
+				WHERE rn = 1
+				ORDER BY checked_at`
+			)
+			.bind(bucketSeconds, serviceId, since.toISOString())
+			.all<any>();
+
+		return result.results.map(row => this.mapToStatusCheck(row));
 	}
 
 	async deleteOld(olderThanDays: number): Promise<number> {
